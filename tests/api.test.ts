@@ -3,24 +3,33 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createApp } from "../src/app.js";
+import { MAX_REQUEST_BODY_BYTES } from "../src/constants.js";
 import { createDatabase } from "../src/db/client.js";
+import { specs } from "../src/db/schema.js";
 
 describe("spec API", () => {
   let directory: string;
   let database: ReturnType<typeof createDatabase>;
   let app: ReturnType<typeof createApp>;
+  let databaseClosed: boolean;
+  let logs: string[];
 
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), "spectrak-"));
     database = createDatabase(join(directory, "test.db"));
-    app = createApp(database.db);
+    databaseClosed = false;
+    logs = [];
+    app = createApp(database.db, { logger: (message) => logs.push(message) });
   });
 
   afterEach(async () => {
-    database.sqlite.close();
+    if (!databaseClosed) {
+      database.sqlite.close();
+    }
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -43,15 +52,19 @@ describe("spec API", () => {
     expect(body.endpoints).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ method: "GET", path: "/api/help" }),
+        expect.objectContaining({ method: "GET", path: "/health" }),
         expect.objectContaining({ method: "GET", path: "/api/specs/:uuid" }),
         expect.objectContaining({ method: "POST", path: "/api/specs" }),
         expect.objectContaining({ method: "POST", path: "/api/specs/resolve" }),
       ]),
     );
+    expect(body.requirements.maxRequestBodyBytes).toBe(MAX_REQUEST_BODY_BYTES);
+    expect(logs.some((log) => log.startsWith("GET /api/help 200"))).toBe(true);
   });
 
   it("creates, retrieves, updates, and deletes a spec", async () => {
-    const uuid = randomUUID();
+    const uuid = randomUUID().toUpperCase();
+    const normalizedUuid = uuid.toLowerCase();
     const createResponse = await app.request("/api/specs", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -59,15 +72,21 @@ describe("spec API", () => {
     });
 
     expect(createResponse.status).toBe(201);
-    expect(await createResponse.json()).toEqual({ success: true, uuid });
+    expect(await createResponse.json()).toEqual({ success: true, uuid: normalizedUuid });
 
     const getResponse = await app.request(`/api/specs/${uuid}`);
     expect(getResponse.status).toBe(200);
     expect(await getResponse.json()).toMatchObject({
-      uuid,
+      uuid: normalizedUuid,
       title: "Introduction",
       content: "# Hello",
     });
+
+    const storedSpec = database.db.select().from(specs).where(eq(specs.uuid, normalizedUuid)).get();
+    expect(storedSpec).toMatchObject({ uuid: normalizedUuid, title: "Introduction" });
+    expect(Number.isInteger(storedSpec?.createdAt)).toBe(true);
+    expect(Number.isInteger(storedSpec?.updatedAt)).toBe(true);
+    expect(storedSpec?.updatedAt).toBeGreaterThanOrEqual(storedSpec?.createdAt ?? 0);
 
     const updateResponse = await app.request("/api/specs", {
       method: "POST",
@@ -76,15 +95,60 @@ describe("spec API", () => {
     });
 
     expect(updateResponse.status).toBe(200);
-    expect(await updateResponse.json()).toEqual({ success: true, uuid });
+    expect(await updateResponse.json()).toEqual({ success: true, uuid: normalizedUuid });
 
     const updatedSpec = await (await app.request(`/api/specs/${uuid}`)).json();
-    expect(updatedSpec).toMatchObject({ uuid, title: null, content: "# Updated" });
+    expect(updatedSpec).toMatchObject({ uuid: normalizedUuid, title: null, content: "# Updated" });
 
     const deleteResponse = await app.request(`/api/specs/${uuid}`, { method: "DELETE" });
     expect(deleteResponse.status).toBe(200);
     expect(await deleteResponse.json()).toEqual({ success: true, message: "Spec deleted" });
+    const repeatedDeleteResponse = await app.request(`/api/specs/${uuid}`, { method: "DELETE" });
+    expect(repeatedDeleteResponse.status).toBe(200);
+    expect(await repeatedDeleteResponse.json()).toEqual({
+      success: true,
+      message: "Spec deleted",
+    });
     expect((await app.request(`/api/specs/${uuid}`)).status).toBe(404);
+  });
+
+  it("atomically distinguishes concurrent insert and update requests", async () => {
+    const uuid = randomUUID();
+    const responses = await Promise.all(
+      ["# First", "# Second"].map((content) =>
+        app.request("/api/specs", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ uuid, content }),
+        }),
+      ),
+    );
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 201]);
+    const storedSpec = database.db.select().from(specs).where(eq(specs.uuid, uuid)).get();
+    expect(["# First", "# Second"]).toContain(storedSpec?.content);
+  });
+
+  it("checks database health and reports request logs", async () => {
+    const response = await app.request("/health");
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "ok" });
+    expect(logs.some((log) => log.startsWith("GET /health 200"))).toBe(true);
+  });
+
+  it("reports an unhealthy database", async () => {
+    database.sqlite.close();
+    databaseClosed = true;
+
+    const response = await app.request("/health");
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      status: "error",
+      error: "Database unavailable",
+      code: "ERR_HEALTHCHECK_FAILED",
+    });
   });
 
   it("returns structured errors for invalid input and missing specs", async () => {
@@ -119,6 +183,21 @@ describe("spec API", () => {
       code: "ERR_INVALID_JSON",
     });
 
+    const oversizedResponse = await app.request("/api/specs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        uuid: randomUUID(),
+        content: "x".repeat(MAX_REQUEST_BODY_BYTES),
+      }),
+    });
+
+    expect(oversizedResponse.status).toBe(413);
+    expect(await oversizedResponse.json()).toEqual({
+      error: "Request body too large",
+      code: "ERR_PAYLOAD_TOO_LARGE",
+    });
+
     const routeNotFoundResponse = await app.request("/api/unknown");
     expect(routeNotFoundResponse.status).toBe(404);
     expect(await routeNotFoundResponse.json()).toEqual({
@@ -132,15 +211,19 @@ describe("Markdown resolver", () => {
   let directory: string;
   let database: ReturnType<typeof createDatabase>;
   let app: ReturnType<typeof createApp>;
+  let databaseClosed: boolean;
 
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), "spectrak-"));
     database = createDatabase(join(directory, "test.db"));
-    app = createApp(database.db);
+    databaseClosed = false;
+    app = createApp(database.db, { logger: () => undefined });
   });
 
   afterEach(async () => {
-    database.sqlite.close();
+    if (!databaseClosed) {
+      database.sqlite.close();
+    }
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -149,7 +232,7 @@ describe("Markdown resolver", () => {
     const secondUuid = randomUUID();
 
     for (const [uuid, content] of [
-      [firstUuid, "## First"],
+      [firstUuid, "## First $1 \\ path [brackets]"],
       [secondUuid, "## Second"],
     ]) {
       const response = await app.request("/api/specs", {
@@ -177,6 +260,7 @@ describe("Markdown resolver", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.resolvedContent).toContain("## First");
+    expect(body.resolvedContent).toContain("## First $1 \\ path [brackets]");
     expect(body.resolvedContent).toContain("## Second");
     expect(body.resolvedContent.match(/## First/g)).toHaveLength(2);
     expect(body.resolvedContent).toContain("> ⚠️ [Spec missing for UUID:");

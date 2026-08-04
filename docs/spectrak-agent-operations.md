@@ -24,6 +24,20 @@ The help response is static and machine-readable. It lists the available endpoin
 
 Do not assume that `SPECTRAK_URL` points to the same host as the project being modified. The Spectrak service may be local, remote, or provided by a development environment.
 
+Check service and database readiness separately when starting an agent task:
+
+```sh
+curl "$SPECTRAK_URL/health"
+```
+
+The health endpoint executes a lightweight SQLite query. A successful response is:
+
+```json
+{
+  "status": "ok"
+}
+```
+
 ## Reference Forms
 
 Use a compact expandable reference when an index is expected to be resolved by Spectrak:
@@ -173,9 +187,12 @@ The current API does not provide a list or orphan-detection endpoint. Do not cla
 
 All API errors use an `error` and `code` field. Validation errors also include `details`.
 
+JSON request bodies are limited to 1 MiB. A larger request returns `ERR_PAYLOAD_TOO_LARGE` and should not be retried unchanged.
+
 | Code | Agent response |
 |---|---|
 | `ERR_VALIDATION` | Correct the UUID or request payload before retrying. |
+| `ERR_PAYLOAD_TOO_LARGE` | Reduce the request body before retrying. |
 | `ERR_INVALID_JSON` | Correct the request serialization before retrying. |
 | `ERR_SPEC_NOT_FOUND` | Report or repair the missing reference; do not invent content. |
 | `ERR_NOT_FOUND` | Confirm the endpoint path from `/api/help`. |

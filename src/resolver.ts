@@ -2,11 +2,10 @@ import { inArray } from "drizzle-orm";
 
 import type { AppDatabase } from "./db/client.js";
 import { specs } from "./db/schema.js";
+import { uuidV4PatternSource } from "./validation.js";
 
-const uuidPattern =
-  "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 const referencePattern = new RegExp(
-  `\\{\\{spec:(${uuidPattern})\\}\\}|\\[[^\\]]*\\]\\(spec:\\/\\/(${uuidPattern})\\)`,
+  `\\{\\{spec:(${uuidV4PatternSource})\\}\\}|\\[[^\\]]*\\]\\(spec:\\/\\/(${uuidV4PatternSource})\\)`,
   "gi",
 );
 

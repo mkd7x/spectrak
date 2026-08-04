@@ -10,6 +10,8 @@ Use the configured `SPECTRAK_URL` base URL. Before assuming endpoint details or 
 curl "$SPECTRAK_URL/api/help"
 ```
 
+Check service and database readiness with `GET /health` before a task that depends on retrieval.
+
 Do not access or modify `specs.db` directly from an agent task.
 
 ## Retrieval
@@ -74,6 +76,7 @@ Deletion is performed through `DELETE /api/specs/:uuid` and is idempotent.
 ## Errors
 
 - `ERR_VALIDATION`: correct the UUID or payload before retrying.
+- `ERR_PAYLOAD_TOO_LARGE`: reduce the request body before retrying.
 - `ERR_INVALID_JSON`: correct request serialization before retrying.
 - `ERR_SPEC_NOT_FOUND`: report or repair the missing reference; do not invent content.
 - `ERR_NOT_FOUND`: confirm the endpoint path from `/api/help`.

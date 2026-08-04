@@ -11,6 +11,12 @@ export const helpDocument = {
     },
     {
       method: "GET",
+      path: "/health",
+      purpose: "Check service and database readiness",
+      response: "{ status }",
+    },
+    {
+      method: "GET",
       path: "/api/specs/:uuid",
       purpose: "Retrieve one Markdown spec chunk",
       response: "{ uuid, title, content, updatedAt }",
@@ -57,9 +63,11 @@ export const helpDocument = {
     uuid: "UUID v4",
     content: "Markdown string",
     timestamps: "Unix seconds",
+    maxRequestBodyBytes: 1048576,
   },
   errors: [
     "ERR_VALIDATION",
+    "ERR_PAYLOAD_TOO_LARGE",
     "ERR_SPEC_NOT_FOUND",
     "ERR_INVALID_JSON",
     "ERR_NOT_FOUND",

@@ -1,9 +1,12 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { eq } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 import type { AppDatabase } from "./db/client.js";
 import { specs } from "./db/schema.js";
 import { helpDocument } from "./help.js";
+import { MAX_REQUEST_BODY_BYTES } from "./constants.js";
 import { resolveMarkdown } from "./resolver.js";
 import { resolvePayloadSchema, specPayloadSchema, uuidV4Schema } from "./validation.js";
 
@@ -11,6 +14,10 @@ type ErrorBody = {
   error: string;
   code: string;
   details?: unknown;
+};
+
+type AppOptions = {
+  logger?: (message: string) => void;
 };
 
 function errorResponse(
@@ -53,8 +60,9 @@ async function readJson(request: Request): Promise<unknown> {
   }
 }
 
-export function createApp(db: AppDatabase) {
+export function createApp(db: AppDatabase, options: AppOptions = {}) {
   const app = new Hono();
+  const logger = options.logger ?? console.log;
 
   app.notFound((c) => c.json({ error: "Route not found", code: "ERR_NOT_FOUND" }, 404));
 
@@ -67,8 +75,43 @@ export function createApp(db: AppDatabase) {
     return c.json({ error: "Internal server error", code: "ERR_INTERNAL" }, 500);
   });
 
+  app.use("*", async (c, next) => {
+    const startedAt = Date.now();
+    try {
+      await next();
+    } finally {
+      logger(
+        `${c.req.method} ${c.req.path} ${c.res.status} ${Date.now() - startedAt}ms`,
+      );
+    }
+  });
+
+  const requestBodyLimit = bodyLimit({
+    maxSize: MAX_REQUEST_BODY_BYTES,
+    onError: (c) =>
+      c.json(
+        { error: "Request body too large", code: "ERR_PAYLOAD_TOO_LARGE" },
+        413,
+      ),
+  });
+  app.use("/api/specs", requestBodyLimit);
+  app.use("/api/specs/*", requestBodyLimit);
+
   // spec: SPK-HELP-001
   app.get("/api/help", (c) => c.json(helpDocument));
+
+  app.get("/health", (c) => {
+    try {
+      db.run(sql`select 1`);
+      return c.json({ status: "ok" });
+    } catch (error) {
+      logger(`health check failed: ${error instanceof Error ? error.message : String(error)}`);
+      return c.json(
+        { status: "error", error: "Database unavailable", code: "ERR_HEALTHCHECK_FAILED" },
+        503,
+      );
+    }
+  });
 
   // spec: SPK-RESOLVE-001
   app.post("/api/specs/resolve", async (c) => {
@@ -121,10 +164,24 @@ export function createApp(db: AppDatabase) {
 
     const uuid = payload.data.uuid.toLowerCase();
     const now = Math.floor(Date.now() / 1000);
-    const existing = db.select({ uuid: specs.uuid }).from(specs).where(eq(specs.uuid, uuid)).get();
+    const status = db.transaction((tx) => {
+      const insertResult = tx
+        .insert(specs)
+        .values({
+          uuid,
+          title: payload.data.title ?? null,
+          content: payload.data.content,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .onConflictDoNothing({ target: specs.uuid })
+        .run();
 
-    if (existing) {
-      db.update(specs)
+      if (insertResult.changes > 0) {
+        return 201 as const;
+      }
+
+      tx.update(specs)
         .set({
           title: payload.data.title ?? null,
           content: payload.data.content,
@@ -133,28 +190,10 @@ export function createApp(db: AppDatabase) {
         .where(eq(specs.uuid, uuid))
         .run();
 
-      return c.json({ success: true, uuid }, 200);
-    }
+      return 200 as const;
+    });
 
-    db.insert(specs)
-      .values({
-        uuid,
-        title: payload.data.title ?? null,
-        content: payload.data.content,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .onConflictDoUpdate({
-        target: specs.uuid,
-        set: {
-          title: payload.data.title ?? null,
-          content: payload.data.content,
-          updatedAt: now,
-        },
-      })
-      .run();
-
-    return c.json({ success: true, uuid }, 201);
+    return c.json({ success: true, uuid }, status);
   });
 
   // spec: SPK-API-001

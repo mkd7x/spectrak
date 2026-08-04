@@ -22,6 +22,8 @@ Database migrations are applied automatically when the application starts.
 
 Runtime API discovery is available at `GET /api/help`.
 
+Service and database readiness is available at `GET /health`. JSON request bodies are limited to 1 MiB.
+
 The detailed agent operations guide is in `docs/spectrak-agent-operations.md`. A copyable instruction pack for consuming projects is in `agent-instructions/`; it contains `AGENTS.md` and GitHub Copilot instructions.
 
 ## Commands
@@ -37,6 +39,20 @@ npm run db:migrate   # Apply migrations manually
 ```
 
 ## API
+
+### Health check
+
+`GET /health`
+
+Executes a lightweight SQLite query and returns `200 OK` when the service and database are ready:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+An unavailable database returns `503 Service Unavailable` with a structured error response.
 
 ### Discover API capabilities
 

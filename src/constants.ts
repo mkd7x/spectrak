@@ -1,0 +1,2 @@
+// spec: SPK-ERROR-001
+export const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
