@@ -1,0 +1,6 @@
+node_modules/
+dist/
+specs.db
+specs.db-shm
+specs.db-wal
+.DS_Store
